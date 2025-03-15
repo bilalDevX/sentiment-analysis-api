@@ -1,39 +1,32 @@
 from fastapi import FastAPI, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.future import select
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy import Column, Integer, String, JSON
 from pydantic import BaseModel
 from transformers import pipeline
-import asyncio
 
-# FastAPI app
+# Initialize FastAPI
 app = FastAPI()
 
-# Database Config (Async SQLAlchemy with SQLite)
+# Database Configuration (Async SQLAlchemy with SQLite)
 DATABASE_URL = "sqlite+aiosqlite:///./sentiment.db"
-
-engine = create_async_engine(DATABASE_URL, echo=True)
-
+engine = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
-Base = declarative_base()
+# Define Base for SQLAlchemy Models
+class Base(DeclarativeBase):
+    pass
 
-# Sentiment Model
-sentiment_model = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
-
-
-# sentiment_model = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
+# Load Emotion Analysis Model
+sentiment_model = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
 
 # Database Model
-from sqlalchemy import Column, Integer, String, Float
-
 class Sentiment(Base):
-    __tablename__ = "sentiment"
+    __tablename__ = "sentiments"
 
     id = Column(Integer, primary_key=True, index=True)
     text = Column(String, nullable=False)
-    sentiment = Column(String, nullable=False)
-    confidence = Column(Float, nullable=False)
+    emotions = Column(JSON, nullable=False)  # Store multiple emotions & scores as JSON
 
 # Pydantic Schemas
 class SentimentCreate(BaseModel):
@@ -42,18 +35,17 @@ class SentimentCreate(BaseModel):
 class SentimentResponse(BaseModel):
     id: int
     text: str
-    sentiment: str
-    confidence: float
+    emotions: dict  # Dictionary storing emotions & confidence scores
 
     class Config:
         from_attributes = True
 
-# Dependency for DB session
+# Dependency for Database Session
 async def get_db():
     async with SessionLocal() as session:
         yield session
 
-# Create DB Tables
+# Create Database Tables
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -66,9 +58,12 @@ async def on_startup():
 # API Endpoints
 @app.post("/sentiment/", response_model=SentimentResponse)
 async def analyze_sentiment(input: SentimentCreate, db: AsyncSession = Depends(get_db)):
-    sentiment = sentiment_model(input.text)[0]
+    predictions = sentiment_model(input.text)  # Get multiple emotion predictions
+    
+    # Convert list of dictionaries into a structured dictionary
+    emotions_dict = {emotion["label"]: round(emotion["score"], 3) for emotion in predictions[0]}
 
-    db_sentiment = Sentiment(text=input.text, sentiment=sentiment['label'], confidence=sentiment['score'])
+    db_sentiment = Sentiment(text=input.text, emotions=emotions_dict)
     db.add(db_sentiment)
     await db.commit()
     await db.refresh(db_sentiment)
@@ -77,10 +72,9 @@ async def analyze_sentiment(input: SentimentCreate, db: AsyncSession = Depends(g
 
 @app.get("/sentiment/{id}", response_model=SentimentResponse)
 async def get_sentiment(id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Sentiment).where(Sentiment.id == id))
-    db_sentiment = result.scalar()
+    result = await db.get(Sentiment, id)
 
-    if not db_sentiment:
+    if not result:
         raise HTTPException(status_code=404, detail="Sentiment not found")
 
-    return db_sentiment
+    return result
