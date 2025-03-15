@@ -1,0 +1,6 @@
+fastapi
+unicorn
+transformers
+torch
+sqlalchemy
+databases
